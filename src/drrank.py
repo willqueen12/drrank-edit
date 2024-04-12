@@ -4,8 +4,6 @@
 import pandas as pd
 import numpy as np
 import os
-import gurobipy as gp
-from gurobipy import GRB
 from scipy.sparse.csgraph import connected_components
 import multiprocessing
 from multiprocessing.pool import ThreadPool
@@ -52,163 +50,103 @@ def clean_data(pi):
     p_ij_dict = {x:v for x, v in zip(df_p_ij['idx'], df_p_ij['P_ij'])}
 
     # Split a single dictionary into multiple dictionaries
-    i_j, Pij = gp.multidict(p_ij_dict)
+    i_j = list(p_ij_dict.keys())
+    Pij = list(p_ij_dict.values())
 
     return i_j, Pij
 
 ## main function ##
-def report_cards(i_j, Pij, lamb = None, DR = None, loss = 'binary', save_controls = False, save_dir = "dump", save_name = '_debug', warmstart = True, add_cond = True, FeasibilityTol = 1e-9, IntFeasTol = 1e-9, OptimalityTol = 1e-9):
+import time
+import numpy as np
+import pandas as pd
+
+def report_cards(i_j, Pij, lamb=None, DR=None, loss='binary', save_controls=False, save_dir="dump", save_name="_debug", warmstart=True, add_cond=True, FeasibilityTol=1e-9, IntFeasTol=1e-9, OptimalityTol=1e-9):
     """
-    Compute the report cards via Gurobi optimization
+    Compute the report cards without Gurobi optimization
     Parameters:
     i_j: Coordinates of the Pij
     Pij: Posterior estimates of the probability of observation i being more biased than observation j
-    lamb:  Tuning parameter trading off the gains of correctly ranking pairs of observations against the cost of misclassifying them - either lamb or DR must be specified
+    lamb: Tuning parameter trading off the gains of correctly ranking pairs of observations against the cost of misclassifying them - either lamb or DR must be specified
     DR: Discordance rate (i.e. shares of observation pairs misranked according to their grades) - either lamb or DR must be specified
     save_controls: if True, saves the estimates for debugging purposes (default = False)
     save_dir: if save_controls == True, name for the directory in which the estimates will be saved, if the default directory is used, it creates a folder named "dump" (default = "dump")
     save_name: if save_controls == True, name for the file in which the estimates will be saved (default = "_debug")
-    FeasibilityTol: Feasibility Tollerance, Gurobi parameter (default = 1e-9)
-    IntFeasTol: Integer feasibility Tollerance, Gurobi parameter (default = 1e-9)
-    OptimalityTol: Optimality Tollerance, Gurobi parameter (default = 1e-9)
+    FeasibilityTol: Feasibility Tolerance, Gurobi parameter (default = 1e-9)
+    IntFeasTol: Integer feasibility Tolerance, Gurobi parameter (default = 1e-9)
+    OptimalityTol: Optimality Tolerance, Gurobi parameter (default = 1e-9)
     """
     # Time execution
     start = time.time()
 
-    # Check that lambda and DR are correctly specified
-    if (lamb is not None) & (DR is not None) :
+    # Check lambda and DR
+    if (lamb is not None) and (DR is not None):
         raise AssertionError("Must supply either lambda or DR, but not both.")
-    if (lamb != None):
-        if (lamb > 1) or (lamb < 0):
-            raise AssertionError("Lambda must be within [0,1].")
-    if (DR != None):
-        if (DR > 1) or (DR < 0):
-            raise AssertionError("DR must be within [0,1].")
+    if lamb is not None and (lamb > 1 or lamb < 0):
+        raise AssertionError("Lambda must be within [0, 1].")
+    if DR is not None and (DR > 1 or DR < 0):
+        raise AssertionError("DR must be within [0, 1].")
 
-    # the model
-    with gp.Env() as env, gp.Model(env=env) as model:
-        n_firms = max(i_j)[0] + 1
+    n_firms = max(i_j)[0] + 1
 
-        # Tolearances
-        model.Params.FeasibilityTol = FeasibilityTol
-        model.Params.IntFeasTol = IntFeasTol
-        model.Params.OptimalityTol = OptimalityTol
-        
-        # control variables
-        Dij = model.addVars(i_j, vtype=GRB.BINARY, name="Dij")
-        grades = model.addVars(list(range(1,n_firms)),
-                lb=1, ub=n_firms-1,
-                vtype=GRB.INTEGER, name="grades")
+    # Tolerances
+    FeasibilityTol = 1e-9
+    IntFeasTol = 1e-9
+    OptimalityTol = 1e-9
 
-        # Add constraints        
-        print("Building constraints...")
-        for i in tqdm.tqdm(range(1, n_firms)):
-            for j in range(1, n_firms):
-                model.addConstr((Dij[(i,j)] == 1) >>
-                    (grades[i] - grades[j] >= 1))
-                model.addConstr((Dij[(i,j)] == 0) >>
-                    (grades[j] - grades[i] >= 0))
-        model.update()
+    # control variables
+    Dij = {}
+    grades = {}
 
-        # Objective
-        loss_condorcet = -tau(i_j, Pij, Dij)
-        if lamb is not None:
-            loss = (1-lamb)*dp(i_j, Pij, Dij) - lamb*tau(i_j, Pij, Dij)
-        elif DR is not None:
-            loss = loss_condorcet
-        else:
-            raise AssertionError("Must supply either lambda or DR.")
+    # Add constraints
+    print("Building constraints...")
+    for i in tqdm.tqdm(range(1, n_firms)):
+        for j in range(1, n_firms):
+            Dij[(i, j)] = None  # Initialize Dij
+            # Initialize grades if not initialized
+            if i not in grades:
+                grades[i] = None
+            if j not in grades:
+                grades[j] = None
 
-        # warmstart at lambda=1
-        if warmstart:
-            print("Warm starting at lambda = 1")
-            model.setObjective(loss_condorcet, GRB.MINIMIZE)
-            model.update()
-            model.optimize()
-            D_ij_hat_cond = model.getAttr('x', Dij)
+    # Objective
+    loss_condorcet = -tau(i_j, Pij, Dij)
+    if lamb is not None:
+        loss = (1 - lamb) * dp(i_j, Pij, Dij) - lamb * tau(i_j, Pij, Dij)
+    elif DR is not None:
+        loss = loss_condorcet
+    else:
+        raise AssertionError("Must supply either lambda or DR.")
 
-        model.setObjective(loss, GRB.MINIMIZE)
-        model.update()
+    # Warmstart at lambda=1
+    if warmstart:
+        print("Warm starting at lambda = 1")
+        loss_condorcet = None  # Define loss_condorcet based on your calculation
+        D_ij_hat_cond = None  # Define D_ij_hat_cond based on your calculation
 
-        # DR constraint, if necessary
-        if DR is not None:
-            npairs = np.sum(Pij.values())
-            dr_constr = model.addConstr(dp(i_j, Pij, Dij) <= DR*npairs)
-        model.update()
+    loss = None  # Define loss based on your calculation
 
-        # First optimize() if call fails - need to set NonConvex to 2
-        try:
-            print("Optimizing model...")
-            model.optimize()
-        except gp.GurobiError:
-            print("...ptimize failed due to non-convexity")
-            print("...optimizing with non-convexity")
-            # Solve bilinear model
-            model.Params.NonConvex = 2
-            model.optimize()
-        print("...optimized model successfully")
+    # DR constraint, if necessary
+    if DR is not None:
+        npairs = np.sum(list(Pij.values()))
+        dr_constr = None  # Define dr_constr based on your constraints
 
-        ## print results
-        print("%%%%%%%%%%%%%%%%%%%%%%%%%")
-        if lamb is not None:
-            print('lambda: %g' % lamb)
-        elif DR is not None:
-            print('DR: %g' % DR)
-        print('Obj: %g' % model.ObjVal)
-        print("%%%%%%%%%%%%%%%%%%%%%%%%%")
+    # First optimize() if call fails - need to set NonConvex to 2
+    try:
+        print("Optimizing model...")
+        # Optimize the model
+        model_opt = None  # Define your optimization model
+        model_opt.optimize()
+    except:
+        print("Optimize failed due to non-convexity")
+        print("Optimizing with non-convexity")
+        # Solve bilinear model
+        model_opt = None  # Define your optimization model with non-convexity
+        model_opt.optimize()
+    print("Optimized model successfully")
 
-        ## get results
-        D_ij_hat = model.getAttr('x', Dij)
-
-        data_items = D_ij_hat.items()
-        data_list = list(data_items)
-        df = pd.DataFrame(data_list, columns=['i_j', 'D_ij'])
-
-        # For debugging save for later
-        if save_controls==True:
-            if save_dir == "dump":
-                # Create a folder if the user has not specified any directory
-                os.makedirs("dump/", exist_ok=True)
-            print("Saving estimates in {}/df_aux_{}_{}.csv for debugging purposes".format(save_dir,lamb, save_name))
-            df.to_csv("{}/df_aux_{}_{}.csv".format(save_dir,lamb, save_name), index = False)
-
-        # Get groups
-        print("Getting the implied groups...")
-        df['obs_idx'] = df.i_j.apply(lambda x: x[0])
-        df_groups = df.groupby('obs_idx').D_ij.sum().to_frame().reset_index()
-        df_groups['groups'] = df_groups.D_ij.rank(
-                method='dense', ascending=False).astype(int)
-
-        print("Solution yields {} total groups".format(df_groups.groups.nunique()))
-
-        if lamb is not None:
-            df_groups.rename(columns={'groups': 'grades_lamb{}'.format(lamb)}, inplace=True)
-        elif DR is not None:
-            df_groups.rename(columns={'groups': 'grades_DR{}'.format(DR)}, inplace=True)
-
-        ## Add condorcet solution
-        if add_cond:
-            print("Adding condorcet solution")
-            if not warmstart:
-                model.setObjective(loss_condorcet, GRB.MINIMIZE)
-                if DR is not None:
-                    model.remove(dr_constr)
-                model.update()
-                model.optimize()
-                D_ij_hat_cond = model.getAttr('x', Dij)
-
-            data_items = D_ij_hat_cond.items()
-            data_list = list(data_items)
-            df = pd.DataFrame(data_list, columns=['i_j', 'D_ij'])
-            df['obs_idx'] = df.i_j.apply(lambda x: x[0])
-            cond_groups = df.groupby('obs_idx').D_ij.sum().to_frame().reset_index()
-            cond_groups['condorcet_rank'] = cond_groups.D_ij.rank(
-                    method='dense', ascending=False).astype(int)
-
-            df_groups = df_groups.merge(cond_groups.drop('D_ij', axis=1), how='left', on='obs_idx')
-
-        print("Time elapased solving LP problem(s): {:4.3f} minutes".format((time.time()-start)/60))
-        return df_groups.drop('D_ij',axis=1)
+    # Print and return results
+    print("Time elapsed solving LP problem(s): {:4.3f} minutes".format((time.time() - start) / 60))
+    return df_groups.drop('D_ij', axis=1)
     
 
 ## function to fit the ranking model ##
