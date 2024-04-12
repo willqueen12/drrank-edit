@@ -1,3 +1,8 @@
+# Note
+This is a forked repository of KRW 2023 discussed below. I'm making changes to remove the dependency on Gurobi
+
+---
+
 # DRrank
 
 DRrank is a Python library to implement the Empirical Bayes ranking scheme developed in [Kline, Rose, and Walters (2023)](https://arxiv.org/abs/2306.13005). This code was originally developed by [Hadar Avivi](https://avivihadar.github.io/).
